@@ -124,6 +124,50 @@ final class JSONLTailerTests: XCTestCase {
         XCTAssertFalse(result.delta.isEmpty)
     }
 
+    // MARK: - Token samples for the tok/s badge
+
+    func testScanLinesExtractsClaudeUsageTokenSample() {
+        let line = #"{"type":"assistant","timestamp":"2026-09-08T02:00:00.123Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"output_tokens":25,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#
+        let result = JSONLTailer.scanLines(Data((line + "\n").utf8))
+
+        XCTAssertEqual(result.delta.tokenSamples.count, 1)
+        let sample = try! XCTUnwrap(result.delta.tokenSamples.first)
+        XCTAssertEqual(sample.outputTokens, 25)
+        XCTAssertEqual(sample.messageId, "msg_1")
+        XCTAssertFalse(sample.isCumulative)
+        // Token samples alone make the delta worth shipping.
+        XCTAssertFalse(result.delta.isEmpty)
+    }
+
+    func testScanLinesAssistantLinesWithoutUsageYieldNoSample() {
+        let line = #"{"type":"assistant","timestamp":"2026-09-08T02:00:00.123Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"hi"}]}}"#
+        let result = JSONLTailer.scanLines(Data((line + "\n").utf8))
+
+        XCTAssertTrue(result.delta.tokenSamples.isEmpty)
+        // The assistant text is still extracted.
+        XCTAssertEqual(result.delta.lastAssistantMessage, "hi")
+    }
+
+    func testScanLinesExtractsCodexTokenCountSample() {
+        // Real rollout shape: session-cumulative totals under payload.info.
+        let line = #"{"timestamp":"2026-09-08T02:52:19.053Z","ordinal":14,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":8670,"cached_input_tokens":576,"cache_write_input_tokens":0,"output_tokens":82,"reasoning_output_tokens":0,"total_tokens":8752}}}}"#
+        let result = JSONLTailer.scanLines(Data((line + "\n").utf8))
+
+        XCTAssertEqual(result.delta.tokenSamples.count, 1)
+        let sample = try! XCTUnwrap(result.delta.tokenSamples.first)
+        XCTAssertEqual(sample.outputTokens, 82)
+        XCTAssertTrue(sample.isCumulative)
+        XCTAssertNil(sample.messageId)
+        XCTAssertTrue(result.delta.hasActivity)
+    }
+
+    func testScanLinesTokenCountWithoutInfoYieldsNoSample() {
+        let line = #"{"timestamp":"2026-09-08T02:52:19.053Z","type":"event_msg","payload":{"type":"token_count","info":null}}"#
+        let result = JSONLTailer.scanLines(Data((line + "\n").utf8))
+
+        XCTAssertTrue(result.delta.tokenSamples.isEmpty)
+    }
+
     func testLatestTurnStatusUsesMostRecentCodexTurnEvent() {
         let lines = [
             #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}"#,

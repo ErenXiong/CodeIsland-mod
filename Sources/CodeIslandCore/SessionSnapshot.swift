@@ -111,6 +111,9 @@ public struct SessionSnapshot: Sendable {
     /// a question is pending ("" = pending but text unknown). Set and cleared by
     /// transcript-tail detection; transient, never persisted.
     public var cursorPendingQuestion: String?
+    /// Live output-token rate (tok/s badge). Fed by transcript-tail deltas;
+    /// transient — never persisted. See `TokenRateTracker`.
+    public var tokenRate = TokenRateTracker()
     /// Recent chat messages (max 3) for preview
     public var recentMessages: [ChatMessage] = []
     // Terminal info for window activation

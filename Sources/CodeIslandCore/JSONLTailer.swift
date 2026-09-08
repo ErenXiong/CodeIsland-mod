@@ -40,6 +40,11 @@ public struct ConversationTailDelta: Equatable, Sendable {
     /// File path paired with `attachmentToken`; an additional guard against
     /// applying a delta after the session switched rollout files.
     public let filePath: String?
+    /// Token-usage observations extracted from the newly appended lines
+    /// (Claude assistant usage / Codex token_count). Feeds the tok/s badge;
+    /// see `TokenRateTracker`. Optional for source compatibility with
+    /// synthetic/test deltas.
+    public let tokenSamples: [TokenSample]
 
     public init(
         sessionId: String,
@@ -49,7 +54,8 @@ public struct ConversationTailDelta: Equatable, Sendable {
         hasActivity: Bool = false,
         cursorQuestion: CursorQuestionSignal? = nil,
         attachmentToken: UUID? = nil,
-        filePath: String? = nil
+        filePath: String? = nil,
+        tokenSamples: [TokenSample] = []
     ) {
         self.sessionId = sessionId
         self.lastUserPrompt = lastUserPrompt
@@ -59,12 +65,13 @@ public struct ConversationTailDelta: Equatable, Sendable {
         self.cursorQuestion = cursorQuestion
         self.attachmentToken = attachmentToken
         self.filePath = filePath
+        self.tokenSamples = tokenSamples
     }
 
     /// A delta only carries signal when at least one field is non-nil.
     public var isEmpty: Bool {
         lastUserPrompt == nil && lastAssistantMessage == nil && turnStatus == nil
-            && !hasActivity && cursorQuestion == nil
+            && !hasActivity && cursorQuestion == nil && tokenSamples.isEmpty
     }
 }
 
@@ -320,7 +327,8 @@ public final class JSONLTailer: @unchecked Sendable {
                 hasActivity: scan.delta.hasActivity,
                 cursorQuestion: scan.delta.cursorQuestion,
                 attachmentToken: watch.attachmentToken,
-                filePath: watch.filePath
+                filePath: watch.filePath,
+                tokenSamples: scan.delta.tokenSamples
             )
             onDelta(delta)
         }
@@ -356,9 +364,10 @@ public final class JSONLTailer: @unchecked Sendable {
             public var turnStatus: ConversationTurnStatus?
             public var hasActivity = false
             public var cursorQuestion: CursorQuestionSignal?
+            public var tokenSamples: [TokenSample] = []
             public var isEmpty: Bool {
                 lastUserPrompt == nil && lastAssistantMessage == nil && turnStatus == nil
-                    && !hasActivity && cursorQuestion == nil
+                    && !hasActivity && cursorQuestion == nil && tokenSamples.isEmpty
             }
         }
         public let delta: Delta
@@ -435,6 +444,20 @@ public final class JSONLTailer: @unchecked Sendable {
                     delta.lastAssistantMessage = trimmed
                 }
             }
+            // Per-message output tokens for the live tok/s badge. Continuation
+            // lines of one API response repeat id and usage; TokenRateTracker
+            // dedupes on the message id.
+            if let timestampRaw = json["timestamp"] as? String,
+               let timestamp = ClaudeUsageScanner.parseISO8601(timestampRaw),
+               let usage = message["usage"] as? [String: Any],
+               let outputTokens = usage["output_tokens"] as? Int {
+                delta.tokenSamples.append(TokenSample(
+                    timestamp: timestamp,
+                    outputTokens: outputTokens,
+                    isCumulative: false,
+                    messageId: message["id"] as? String
+                ))
+            }
         case "event_msg":
             delta.hasActivity = true
             guard let payload = json["payload"] as? [String: Any],
@@ -446,6 +469,20 @@ public final class JSONLTailer: @unchecked Sendable {
             // forward-compatible guess at the obvious name for a failed turn.
             case "task_complete", "turn_aborted", "turn_failed":
                 delta.turnStatus = .idle
+            // Session-cumulative output tokens; TokenRateTracker diffs
+            // consecutive totals into per-sample deltas.
+            case "token_count":
+                if let timestampRaw = json["timestamp"] as? String,
+                   let timestamp = ClaudeUsageScanner.parseISO8601(timestampRaw),
+                   let info = payload["info"] as? [String: Any],
+                   let totals = info["total_token_usage"] as? [String: Any],
+                   let outputTokens = totals["output_tokens"] as? Int {
+                    delta.tokenSamples.append(TokenSample(
+                        timestamp: timestamp,
+                        outputTokens: outputTokens,
+                        isCumulative: true
+                    ))
+                }
             default:
                 break
             }
