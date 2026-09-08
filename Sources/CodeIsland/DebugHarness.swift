@@ -229,6 +229,28 @@ enum DebugHarness {
             hourlyOutputTokens: [0, 0, 4200, 18_000, 9500, 0, 22_000, 41_000, 12_000, 30_500, 52_000, 17_500],
             scannedAt: Date()
         )
+
+        // Codex footer line — same shape, cumulative-rollout-derived numbers.
+        var codexFiveH = CodexUsageTotals()
+        codexFiveH.inputTokens = 76_000
+        codexFiveH.cachedInputTokens = 51_000
+        codexFiveH.cacheWriteInputTokens = 9_200
+        codexFiveH.outputTokens = 41_300
+        codexFiveH.reasoningOutputTokens = 6_800
+        codexFiveH.eventCount = 54
+        var codexToday = CodexUsageTotals()
+        codexToday.inputTokens = 190_000
+        codexToday.cachedInputTokens = 120_000
+        codexToday.cacheWriteInputTokens = 18_000
+        codexToday.outputTokens = 88_000
+        codexToday.reasoningOutputTokens = 15_400
+        codexToday.eventCount = 137
+        state.codexUsage = CodexUsageScanner.Snapshot(
+            last5h: codexFiveH,
+            today: codexToday,
+            hourlyOutputTokens: [0, 0, 2100, 9_400, 4_800, 0, 11_000, 20_500, 6_200, 15_800, 26_400, 9_100],
+            scannedAt: Date()
+        )
     }
 
     private static func applyBusy(to state: AppState) {

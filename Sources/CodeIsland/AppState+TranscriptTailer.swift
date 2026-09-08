@@ -188,6 +188,13 @@ extension AppState {
         guard var session = sessions[delta.sessionId] else { return }
         var mutated = false
 
+        if !delta.tokenSamples.isEmpty {
+            for sample in delta.tokenSamples {
+                session.tokenRate.append(sample)
+            }
+            mutated = true
+        }
+
         if delta.hasActivity {
             session.lastActivity = Date()
             mutated = true

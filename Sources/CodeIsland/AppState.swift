@@ -231,10 +231,13 @@ final class AppState {
     /// Local-transcript token usage shown in the session-list footer.
     /// Refreshed lazily on panel expansion (no resident timer, no API calls).
     var claudeUsage: ClaudeUsageScanner.Snapshot?
+    /// Same, for Codex session rollouts — feeds the footer's Codex line.
+    var codexUsage: CodexUsageScanner.Snapshot?
     private var usageScanInFlight = false
     /// Incremental parse state — round-trips through each detached scan so
     /// growing transcripts are only read past their last consumed offset.
     private var usageFileCache = ClaudeUsageScanner.FileCache()
+    private var codexUsageFileCache = CodexUsageScanner.FileCache()
 
     /// Glance completion mode: an agent finished while the pill was collapsed —
     /// light the dot instead of expanding. Cleared when the user expands the
@@ -1050,19 +1053,25 @@ final class AppState {
     }
 
     /// Prewarm at launch so the footer doesn't pop in (and shift panel height)
-    /// on the first expansion.
+    /// on the first expansion. Refreshes the Claude and Codex usage footers
+    /// together — both are cheap incremental scans sharing one throttle.
     func refreshClaudeUsageIfStale() {
         guard UserDefaults.standard.bool(forKey: SettingsKey.showUsageStats) else { return }
         guard !usageScanInFlight else { return }
         if let scannedAt = claudeUsage?.scannedAt, Date().timeIntervalSince(scannedAt) < 120 { return }
         usageScanInFlight = true
         let cacheCopy = usageFileCache
+        let codexCacheCopy = codexUsageFileCache
         Task.detached(priority: .utility) {
             var cache = cacheCopy
             let snapshot = ClaudeUsageScanner.scan(cache: &cache)
+            var codexCache = codexCacheCopy
+            let codexSnapshot = CodexUsageScanner.scan(cache: &codexCache)
             await MainActor.run { [weak self] in
                 self?.claudeUsage = snapshot
                 self?.usageFileCache = cache
+                self?.codexUsage = codexSnapshot
+                self?.codexUsageFileCache = codexCache
                 self?.usageScanInFlight = false
             }
         }
