@@ -157,9 +157,15 @@ struct NotchPanelView: View {
         let extra: CGFloat = appState.status == .idle ? 0 : 20
         // Reserve space for tool status — proportional to screen width
         let toolExtra: CGFloat = displayedToolStatus ? (hasNotch ? screenWidth * 0.03 : screenWidth * 0.04) : 0
+        // Collapsed multi-agent affordances: one health dot per active session
+        // in the right wing, and an identity chip (project name) in the left
+        // wing once the rotation has 2+ sessions to tell apart.
+        let activeCount = appState.activeSessionCount
+        let dotExtra: CGFloat = activeCount > 0 ? CGFloat(min(activeCount, 6)) * 8 + 4 : 0
+        let chipExtra: CGFloat = activeCount > 1 ? 58 : 0
         // Immediate hover acknowledgement: a slight widen while the expand delay runs
         let prehoverExtra: CGFloat = shouldShowPrehover ? NotchHoverInteraction.prehoverWidthDelta : 0
-        return nw + wing * 2 + extra + toolExtra + prehoverExtra
+        return nw + wing * 2 + extra + toolExtra + dotExtra + chipExtra + prehoverExtra
     }
 
     var body: some View {
@@ -502,6 +508,30 @@ private struct CompactLeftWing: View {
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.3), value: displaySource)
 
+                // Live output-flow signal: green dot while streaming, orange dot
+                // + tiny rate while crawling, pulsing red dot when stalled.
+                if let session = displaySession, session.status == .processing || session.status == .running {
+                    TokenRateIndicator(
+                        tracker: session.tokenRate,
+                        toolRunning: session.currentTool != nil
+                    )
+                }
+
+                // Identity chip: with 2+ active sessions the mascots can be
+                // identical (two Claude terminals), so the project name is what
+                // makes the rotation legible.
+                if appState.activeSessionCount > 1,
+                   let cwd = displaySession?.cwd, !cwd.isEmpty {
+                    let project = (cwd as NSString).lastPathComponent
+                    Text(project)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 56, alignment: .leading)
+                        .help(project)
+                }
+
                 // On notch screens, show tool name only (no description, space is tight)
                 if hasNotch, showToolStatus, let tool = shownTool {
                     Text(ToolNameDisplay.compact(tool))
@@ -535,6 +565,139 @@ private struct CompactLeftWing: View {
             let newTool = liveTool
             withAnimation(.easeInOut(duration: 0.2)) { shownTool = newTool }
         }
+    }
+}
+
+/// Collapsed-pill output-flow signal, in the left wing next to the mascot.
+/// Green dot = streaming at a healthy rate; orange dot + tiny "N t/s" =
+/// crawling (weak network / slow endpoint); pulsing red dot = silent mid-turn
+/// with no tool running. Hidden entirely when there's nothing worth saying —
+/// a running tool legitimately pauses tokens, so that case stays quiet too.
+/// A 1s TimelineView: the schedule lives exactly as long as the collapsed bar.
+private struct TokenRateIndicator: View {
+    let tracker: TokenRateTracker?
+    let toolRunning: Bool
+
+    private static let flowingColor = Color(red: 0.4, green: 1.0, blue: 0.5)
+    private static let slowColor = Color(red: 1.0, green: 0.7, blue: 0.28)
+    private static let stalledColor = Color(red: 1.0, green: 0.35, blue: 0.35)
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let now = context.date
+            let health = tracker?.health(now: now, toolRunning: toolRunning) ?? .none
+            HStack(spacing: 3) {
+                if health != .none {
+                    Image(systemName: "circle.fill")
+                        .font(.system(size: 6))
+                        .foregroundStyle(color(for: health))
+                        .symbolEffect(.pulse, options: .repeating, isActive: health == .stalled)
+                }
+                if health == .slow, let tracker,
+                   let text = TokenRateTracker.compactSlowText(samples: tracker.samples, now: now) {
+                    Text(text)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Self.slowColor.opacity(0.9))
+                        .lineLimit(1)
+                        .help("output crawling — \(text)")
+                }
+            }
+            .transition(.opacity)
+        }
+    }
+
+    private func color(for health: RateHealth) -> Color {
+        switch health {
+        case .flowing: return Self.flowingColor
+        case .slow: return Self.slowColor
+        case .stalled: return Self.stalledColor
+        case .none: return .clear
+        }
+    }
+}
+
+/// One health dot per active session in the collapsed bar's right wing — the
+/// multi-agent readout that survives rotation: green = flowing, orange =
+/// crawling, pulsing red = stalled, pulsing yellow = waiting on the user, dim =
+/// no token signal yet. Start-time order keeps dots position-stable, so "dot 3"
+/// stays learnable as "that API session". A slightly larger dot with a white
+/// ring marks whichever session the pill is currently displaying — with two
+/// identical mascots (two Claude terminals), that ring is what tells you who
+/// the rotation is on right now.
+private struct CollapsedHealthDots: View {
+    var appState: AppState
+
+    private static let maxDots = 6
+
+    private var activeSessions: [(id: String, session: SessionSnapshot)] {
+        appState.sessions
+            .filter { $0.value.status != .idle }
+            .sorted { $0.value.startTime < $1.value.startTime }
+            .map { (id: $0.key, session: $0.value) }
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let sessions = activeSessions
+            let displayedId = appState.rotatingSessionId
+                ?? appState.activeSessionId
+                ?? sessions.first?.id
+            HStack(spacing: 4) {
+                ForEach(sessions.prefix(Self.maxDots), id: \.id) { item in
+                    dot(
+                        for: item.session,
+                        displayed: item.id == displayedId,
+                        now: context.date
+                    )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func dot(for session: SessionSnapshot, displayed: Bool, now: Date) -> some View {
+        let waiting = session.status == .waitingApproval || session.status == .waitingQuestion
+        let health = session.tokenRate.health(now: now, toolRunning: session.currentTool != nil)
+        let base = Image(systemName: "circle.fill")
+            .font(.system(size: displayed ? 7.5 : 5.5))
+            .foregroundStyle(color(for: waiting, health))
+            .symbolEffect(.pulse, options: .repeating, isActive: waiting || health == .stalled)
+            .opacity(!waiting && health == .none ? 0.35 : 1)
+            .animation(.easeInOut(duration: 0.2), value: displayed)
+        let dot = base.help(tooltip(for: session, waiting: waiting, health: health))
+        if displayed {
+            dot.overlay(
+                Circle().stroke(.white.opacity(0.8), lineWidth: 1).padding(1)
+            )
+        } else {
+            dot
+        }
+    }
+
+    private func color(for waiting: Bool, _ health: RateHealth) -> Color {
+        if waiting { return Color(red: 1.0, green: 0.8, blue: 0.3) }
+        switch health {
+        case .flowing: return Color(red: 0.4, green: 1.0, blue: 0.5)
+        case .slow: return Color(red: 1.0, green: 0.7, blue: 0.28)
+        case .stalled: return Color(red: 1.0, green: 0.35, blue: 0.35)
+        case .none: return .white
+        }
+    }
+
+    private func tooltip(for session: SessionSnapshot, waiting: Bool, health: RateHealth) -> String {
+        let project = session.cwd.map { ($0 as NSString).lastPathComponent } ?? ""
+        let state: String
+        if waiting { state = session.status == .waitingQuestion ? "waiting for your answer" : "waiting for approval" }
+        else {
+            switch health {
+            case .flowing: state = "streaming"
+            case .slow: state = "output crawling"
+            case .stalled: state = "stalled?"
+            case .none: state = session.currentTool != nil ? "running \(session.currentTool ?? "")" : "no output yet"
+            }
+        }
+        let parts = [session.source, project, state].filter { !$0.isEmpty }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -607,6 +770,10 @@ private struct CompactRightWing: View {
                         .foregroundStyle(Color(red: 1.0, green: 0.7, blue: 0.28))
                         .symbolEffect(.pulse, options: .repeating)
                 }
+
+                // One health dot per active session — the collapsed multi-agent
+                // readout. Sits before the count per design.
+                CollapsedHealthDots(appState: appState)
 
                 if showToolStatus {
                     // Detailed mode: session count (project name is shown in center on non-notch)
@@ -1762,6 +1929,7 @@ private struct SessionListView: View {
     var appState: AppState
     /// When set, only show this session (auto-expand on completion)
     var onlySessionId: String? = nil
+    @ObservedObject private var l10n = L10n.shared
     @AppStorage(SettingsKey.sessionGroupingMode) private var groupingMode = SettingsDefaults.sessionGroupingMode
     @AppStorage(SettingsKey.maxVisibleSessions) private var maxVisibleSessions = SettingsDefaults.maxVisibleSessions
     @AppStorage(SettingsKey.showUsageStats) private var showUsageStats = SettingsDefaults.showUsageStats
@@ -1915,50 +2083,88 @@ private struct SessionListView: View {
             }
 
             // Full session list only — the completion card stays focused on
-            // the finished session.
+            // the finished session. One footer line per tool that has data.
             if showUsageStats, onlySessionId == nil, let usage = appState.claudeUsage,
                !(usage.last5h.isEmpty && usage.today.isEmpty) {
-                UsageFooterLine(usage: usage)
+                UsageFooterLine(model: .claude(usage, todayLabel: l10n["usage_today"]))
+            }
+            if showUsageStats, onlySessionId == nil, let usage = appState.codexUsage,
+               !(usage.last5h.isEmpty && usage.today.isEmpty) {
+                UsageFooterLine(model: .codex(usage, todayLabel: l10n["usage_today"]))
             }
         }
     }
 }
 
-/// Token totals from the local Claude transcripts — "in" is billed input
-/// (input + cache writes); cache reads live in the tooltip.
+/// Render model for one usage-footer line so every tool shares the identical
+/// layout and typography; the factories below derive the text from each
+/// scanner's snapshot shape.
+private struct UsageFooterModel {
+    let label: String
+    let compact5h: String
+    let compactToday: String
+    let tooltip: String
+    let hourlyBuckets: [Int]
+
+    /// Claude token totals from local transcripts — "in" is billed input
+    /// (input + cache writes); cache reads live in the tooltip.
+    static func claude(_ usage: ClaudeUsageScanner.Snapshot, todayLabel: String) -> UsageFooterModel {
+        func compact(_ t: ClaudeUsageTotals) -> String {
+            "\(ClaudeUsageScanner.formatTokens(t.inputTokens + t.cacheCreationTokens))↑ \(ClaudeUsageScanner.formatTokens(t.outputTokens))↓"
+        }
+        func detail(_ label: String, _ t: ClaudeUsageTotals) -> String {
+            "\(label): in \(ClaudeUsageScanner.formatTokens(t.inputTokens)) · out \(ClaudeUsageScanner.formatTokens(t.outputTokens)) · cache write \(ClaudeUsageScanner.formatTokens(t.cacheCreationTokens)) · cache read \(ClaudeUsageScanner.formatTokens(t.cacheReadTokens))"
+        }
+        return UsageFooterModel(
+            label: "Claude",
+            compact5h: compact(usage.last5h),
+            compactToday: compact(usage.today),
+            tooltip: detail("5h", usage.last5h) + "\n" + detail(todayLabel, usage.today),
+            hourlyBuckets: usage.hourlyOutputTokens
+        )
+    }
+
+    /// Codex token totals from local session rollouts — "in" is billed input
+    /// (input + cache writes); cache hits and reasoning tokens are tooltip-only.
+    static func codex(_ usage: CodexUsageScanner.Snapshot, todayLabel: String) -> UsageFooterModel {
+        func compact(_ t: CodexUsageTotals) -> String {
+            "\(ClaudeUsageScanner.formatTokens(t.inputTokens + t.cacheWriteInputTokens))↑ \(ClaudeUsageScanner.formatTokens(t.outputTokens))↓"
+        }
+        func detail(_ label: String, _ t: CodexUsageTotals) -> String {
+            "\(label): in \(ClaudeUsageScanner.formatTokens(t.inputTokens)) · out \(ClaudeUsageScanner.formatTokens(t.outputTokens)) · cache write \(ClaudeUsageScanner.formatTokens(t.cacheWriteInputTokens)) · cached \(ClaudeUsageScanner.formatTokens(t.cachedInputTokens)) · reasoning \(ClaudeUsageScanner.formatTokens(t.reasoningOutputTokens))"
+        }
+        return UsageFooterModel(
+            label: "Codex",
+            compact5h: compact(usage.last5h),
+            compactToday: compact(usage.today),
+            tooltip: detail("5h", usage.last5h) + "\n" + detail(todayLabel, usage.today),
+            hourlyBuckets: usage.hourlyOutputTokens
+        )
+    }
+}
+
 private struct UsageFooterLine: View {
-    let usage: ClaudeUsageScanner.Snapshot
+    let model: UsageFooterModel
     @ObservedObject private var l10n = L10n.shared
 
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "gauge.with.needle")
                 .font(.system(size: 9, weight: .semibold))
-            Text("Claude")
+            Text(model.label)
                 .fontWeight(.semibold)
-            Text("5h \(compact(usage.last5h))")
+            Text("5h \(model.compact5h)")
             Text("·")
                 .foregroundStyle(.white.opacity(0.25))
-            Text("\(l10n["usage_today"]) \(compact(usage.today))")
+            Text("\(l10n["usage_today"]) \(model.compactToday)")
             Spacer()
-            UsageSparkline(buckets: usage.hourlyOutputTokens)
+            UsageSparkline(buckets: model.hourlyBuckets)
         }
         .font(.system(size: 10, weight: .medium, design: .monospaced))
         .foregroundStyle(.white.opacity(0.45))
         .padding(.horizontal, 14)
         .padding(.vertical, 5)
-        .help(detail)
-    }
-
-    private func compact(_ t: ClaudeUsageTotals) -> String {
-        "\(ClaudeUsageScanner.formatTokens(t.inputTokens + t.cacheCreationTokens))↑ \(ClaudeUsageScanner.formatTokens(t.outputTokens))↓"
-    }
-
-    private var detail: String {
-        func line(_ label: String, _ t: ClaudeUsageTotals) -> String {
-            "\(label): in \(ClaudeUsageScanner.formatTokens(t.inputTokens)) · out \(ClaudeUsageScanner.formatTokens(t.outputTokens)) · cache write \(ClaudeUsageScanner.formatTokens(t.cacheCreationTokens)) · cache read \(ClaudeUsageScanner.formatTokens(t.cacheReadTokens))"
-        }
-        return line("5h", usage.last5h) + "\n" + line(l10n["usage_today"], usage.today)
+        .help(model.tooltip)
     }
 }
 
@@ -2408,6 +2614,9 @@ private struct SessionCard: View {
                         }
                         if session.isYoloMode == true {
                             SessionTag("YOLO", color: Color(red: 1.0, green: 0.35, blue: 0.35))
+                        }
+                        if session.status != .idle {
+                            TokenRateTag(tracker: session.tokenRate)
                         }
                         SessionTag(timeAgo(session.startTime))
                         TerminalBadge(session: session)
@@ -3125,6 +3334,23 @@ private struct SessionTag: View {
                 RoundedRectangle(cornerRadius: 5)
                     .fill(color.opacity(0.12))
             )
+    }
+}
+
+/// Live output-token rate badge (tok/s) fed by transcript-tail samples.
+/// A 1s TimelineView — not a Timer — so the schedule lives exactly as long as
+/// the visible card (no resident timer; same pattern as MascotTimeline).
+/// Renders nothing once the newest sample goes stale (~8s after generation
+/// stops) or the rate drops below threshold.
+private struct TokenRateTag: View {
+    let tracker: TokenRateTracker
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            if let text = TokenRateTracker.rateText(samples: tracker.samples, now: context.date) {
+                SessionTag(text, color: Color(red: 0.3, green: 0.85, blue: 0.4))
+            }
+        }
     }
 }
 
