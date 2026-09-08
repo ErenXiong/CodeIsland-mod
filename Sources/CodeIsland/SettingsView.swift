@@ -1197,6 +1197,7 @@ private struct SoundPage: View {
     @AppStorage(SettingsKey.soundTaskComplete) private var soundTaskComplete = SettingsDefaults.soundTaskComplete
     @AppStorage(SettingsKey.soundTaskError) private var soundTaskError = SettingsDefaults.soundTaskError
     @AppStorage(SettingsKey.soundApprovalNeeded) private var soundApprovalNeeded = SettingsDefaults.soundApprovalNeeded
+    @AppStorage(SettingsKey.soundStalled) private var soundStalled = SettingsDefaults.soundStalled
     @AppStorage(SettingsKey.soundPromptSubmit) private var soundPromptSubmit = SettingsDefaults.soundPromptSubmit
     @AppStorage(SettingsKey.soundBoot) private var soundBoot = SettingsDefaults.soundBoot
     @AppStorage(SettingsKey.quietHoursEnabled) private var quietHoursEnabled = SettingsDefaults.quietHoursEnabled
@@ -1263,6 +1264,7 @@ private struct SoundPage: View {
                 }
 
                 Section(l10n["system_section"]) {
+                    SoundEventRow(title: l10n["output_stalled"], subtitle: l10n["output_stalled_desc"], soundName: "8bit_stalled", isOn: $soundStalled)
                     SoundEventRow(title: l10n["boot_sound"], subtitle: l10n["boot_sound_desc"], soundName: "8bit_boot", isOn: $soundBoot)
                 }
 

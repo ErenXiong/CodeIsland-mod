@@ -518,18 +518,20 @@ private struct CompactLeftWing: View {
                 }
 
                 // Identity chip: with 2+ active sessions the mascots can be
-                // identical (two Claude terminals), so the project name is what
-                // makes the rotation legible.
-                if appState.activeSessionCount > 1,
-                   let cwd = displaySession?.cwd, !cwd.isEmpty {
-                    let project = (cwd as NSString).lastPathComponent
-                    Text(project)
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: 56, alignment: .leading)
-                        .help(project)
+                // identical (two Claude terminals), so a name is what makes the
+                // rotation legible. User alias first, project name as fallback.
+                if appState.activeSessionCount > 1, let displayed = displaySession {
+                    let label = displayed.userAlias
+                        ?? displayed.cwd.map { ($0 as NSString).lastPathComponent }
+                    if let label, !label.isEmpty {
+                        Text(label)
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(displayed.userAlias != nil ? .white.opacity(0.75) : .white.opacity(0.55))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: 56, alignment: .leading)
+                            .help(label)
+                    }
                 }
 
                 // On notch screens, show tool name only (no description, space is tight)
@@ -646,6 +648,7 @@ private struct CollapsedHealthDots: View {
                 ForEach(sessions.prefix(Self.maxDots), id: \.id) { item in
                     dot(
                         for: item.session,
+                        id: item.id,
                         displayed: item.id == displayedId,
                         now: context.date
                     )
@@ -655,7 +658,7 @@ private struct CollapsedHealthDots: View {
     }
 
     @ViewBuilder
-    private func dot(for session: SessionSnapshot, displayed: Bool, now: Date) -> some View {
+    private func dot(for session: SessionSnapshot, id: String, displayed: Bool, now: Date) -> some View {
         let waiting = session.status == .waitingApproval || session.status == .waitingQuestion
         let health = session.tokenRate.health(now: now, toolRunning: session.currentTool != nil)
         let base = Image(systemName: "circle.fill")
@@ -663,6 +666,9 @@ private struct CollapsedHealthDots: View {
             .foregroundStyle(color(for: waiting, health))
             .symbolEffect(.pulse, options: .repeating, isActive: waiting || health == .stalled)
             .opacity(!waiting && health == .none ? 0.35 : 1)
+            .frame(width: 10, height: 10)
+            .contentShape(Rectangle())
+            .onTapGesture { appState.focusSession(id) }
             .animation(.easeInOut(duration: 0.2), value: displayed)
         let dot = base.help(tooltip(for: session, waiting: waiting, health: health))
         if displayed {
@@ -685,7 +691,9 @@ private struct CollapsedHealthDots: View {
     }
 
     private func tooltip(for session: SessionSnapshot, waiting: Bool, health: RateHealth) -> String {
-        let project = session.cwd.map { ($0 as NSString).lastPathComponent } ?? ""
+        let name = session.userAlias
+            ?? session.cwd.map { ($0 as NSString).lastPathComponent }
+            ?? ""
         let state: String
         if waiting { state = session.status == .waitingQuestion ? "waiting for your answer" : "waiting for approval" }
         else {
@@ -696,7 +704,7 @@ private struct CollapsedHealthDots: View {
             case .none: state = session.currentTool != nil ? "running \(session.currentTool ?? "")" : "no output yet"
             }
         }
-        let parts = [session.source, project, state].filter { !$0.isEmpty }
+        let parts = [session.source, name, state].filter { !$0.isEmpty }
         return parts.joined(separator: " · ")
     }
 }
@@ -2222,6 +2230,7 @@ private struct ThinScrollView<Content: View>: NSViewRepresentable {
 }
 
 private struct SessionIdentityLine: View {
+    let appState: AppState
     let session: SessionSnapshot
     let sessionId: String
     let projectFontSize: CGFloat
@@ -2230,19 +2239,86 @@ private struct SessionIdentityLine: View {
     let sessionColor: Color
     let dividerColor: Color
     @AppStorage(SettingsKey.showGitBranch) private var showGitBranch = SettingsDefaults.showGitBranch
+    @State private var editingAlias = false
+    @State private var aliasDraft = ""
 
     private var displaySessionId: String { session.displaySessionId(sessionId: sessionId) }
 
     var body: some View {
+        if editingAlias {
+            aliasEditor
+        } else {
+            identityLine
+        }
+    }
+
+    /// Inline alias editor — swapped in over the identity line. Empty submit
+    /// clears the alias.
+    private var aliasEditor: some View {
         HStack(spacing: 4) {
+            Image(systemName: "character.cursor.ibeam")
+                .font(.system(size: projectFontSize - 2, weight: .semibold))
+                .foregroundStyle(projectColor.opacity(0.7))
+            TextField(L10n.shared["alias_placeholder"], text: $aliasDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: projectFontSize, weight: .bold, design: .monospaced))
+                .foregroundStyle(projectColor)
+                .onSubmit { commitAlias() }
+                .onExitCommand { editingAlias = false }
+            Button {
+                commitAlias()
+            } label: {
+                Image(systemName: "checkmark")
+                    .font(.system(size: sessionFontSize, weight: .bold))
+                    .foregroundStyle(Color(red: 0.4, green: 1.0, blue: 0.5))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func commitAlias() {
+        appState.setAlias(aliasDraft, for: sessionId)
+        editingAlias = false
+    }
+
+    private var identityLine: some View {
+        HStack(spacing: 4) {
+            if let alias = session.userAlias, !alias.isEmpty {
+                // User alias outranks the derived project name — this is the
+                // identity the collapsed pill shows too.
+                Text(alias)
+                    .font(.system(size: projectFontSize, weight: .bold, design: .monospaced))
+                    .foregroundStyle(projectColor)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(2)
+                    .help(L10n.shared["alias_hint"] + alias)
+
+                Text("·")
+                    .font(.system(size: sessionFontSize, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(dividerColor)
+            }
+
             ProjectNameLink(
                 name: session.projectDisplayName,
                 cwd: session.cwd,
                 isInteractive: !session.isRemote,
                 fontSize: projectFontSize,
-                color: projectColor
+                color: session.userAlias?.isEmpty == false ? projectColor.opacity(0.6) : projectColor
             )
             .layoutPriority(2)
+
+            Button {
+                aliasDraft = session.userAlias ?? ""
+                editingAlias = true
+            } label: {
+                Image(systemName: "pencil")
+                    .font(.system(size: max(sessionFontSize - 2, 8), weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+            .buttonStyle(.plain)
+            .help(L10n.shared["alias_hint"] + (session.userAlias ?? ""))
 
             if showGitBranch, let branch = session.gitBranch {
                 HStack(spacing: 2) {
@@ -2592,6 +2668,7 @@ private struct SessionCard: View {
                 // Header: project name + optional session label + short ID
                 HStack(alignment: .center, spacing: 8) {
                     SessionIdentityLine(
+                        appState: appState,
                         session: session,
                         sessionId: sessionId,
                         projectFontSize: fontSize + 2,

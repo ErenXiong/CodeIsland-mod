@@ -114,6 +114,10 @@ public struct SessionSnapshot: Sendable {
     /// Live output-token rate (tok/s badge). Fed by transcript-tail deltas;
     /// transient — never persisted. See `TokenRateTracker`.
     public var tokenRate = TokenRateTracker()
+    /// User-assigned nickname set from the expanded card. Stored durably in
+    /// `SessionAliasStore` (UserDefaults, keyed by session id — outlives session
+    /// cleanup); this copy mirrors it for reactive SwiftUI reads.
+    public var userAlias: String?
     /// Recent chat messages (max 3) for preview
     public var recentMessages: [ChatMessage] = []
     // Terminal info for window activation

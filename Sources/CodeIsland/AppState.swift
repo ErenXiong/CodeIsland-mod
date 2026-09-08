@@ -304,6 +304,11 @@ final class AppState {
     }
 
     var rotatingSessionId: String?
+    /// Health-dot tap pin — see `focusSession`. Cleared when the pinned
+    /// session goes idle or disappears.
+    private var manualFocusId: String?
+    /// Per-session throttle for the stalled-output chirp (see cleanup tick).
+    private var lastStallSoundAt: [String: Date] = [:]
     var rotatingSession: SessionSnapshot? {
         guard let rid = rotatingSessionId else { return nil }
         return sessions[rid]
@@ -316,7 +321,30 @@ final class AppState {
         cleanupTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.cleanupIdleSessions()
+                self?.checkStalledSessionSounds()
             }
+        }
+    }
+
+    /// Chirp when a session's output goes silent mid-turn — the audible twin of
+    /// the collapsed pill's red pulsing dot. At most once per session per
+    /// minute; resets as soon as tokens flow again. Routing through
+    /// SoundManager keeps the master toggle, per-event toggle and quiet hours
+    /// all honored.
+    private func checkStalledSessionSounds() {
+        let now = Date()
+        for (id, session) in sessions where session.status == .processing || session.status == .running {
+            let stalled = session.tokenRate.health(now: now, toolRunning: session.currentTool != nil) == .stalled
+            if stalled {
+                if let last = lastStallSoundAt[id], now.timeIntervalSince(last) < 60 { continue }
+                lastStallSoundAt[id] = now
+                SoundManager.shared.handleEvent("Stalled")
+            } else {
+                lastStallSoundAt.removeValue(forKey: id)
+            }
+        }
+        for id in lastStallSoundAt.keys where sessions[id] == nil {
+            lastStallSoundAt.removeValue(forKey: id)
         }
     }
 
@@ -887,6 +915,24 @@ final class AppState {
             rotatingSessionId = nil
             return
         }
+        // Manual pin (health-dot tap): explicit intent outranks everything.
+        if let focus = manualFocusId {
+            if cachedActiveIds.contains(focus), sessions[focus]?.status != .idle {
+                return
+            }
+            manualFocusId = nil
+        }
+        // Exception takeover: a session blocked on the user or whose output has
+        // gone silent claims the display slot until it recovers — rotation is
+        // for the healthy, not for hiding the sick.
+        if let priority = prioritySessionId() {
+            if rotatingSessionId != priority {
+                rotatingSessionId = priority
+                ESP32StatePublisher.shared.notifyDirty()
+                AppleCompanionPublisher.shared.notifyDirty()
+            }
+            return
+        }
         if let current = rotatingSessionId, let idx = cachedActiveIds.firstIndex(of: current) {
             rotatingSessionId = cachedActiveIds[(idx + 1) % cachedActiveIds.count]
         } else {
@@ -894,6 +940,44 @@ final class AppState {
         }
         ESP32StatePublisher.shared.notifyDirty()
         AppleCompanionPublisher.shared.notifyDirty()
+    }
+
+    /// Session that should own the collapsed display slot right now: waiting
+    /// sessions first (user action required), then stalled ones. Nil = all calm,
+    /// rotation may proceed.
+    private func prioritySessionId() -> String? {
+        for id in cachedActiveIds {
+            if let s = sessions[id],
+               s.status == .waitingApproval || s.status == .waitingQuestion {
+                return id
+            }
+        }
+        for id in cachedActiveIds {
+            if let s = sessions[id],
+               s.tokenRate.health(now: Date(), toolRunning: s.currentTool != nil) == .stalled {
+                return id
+            }
+        }
+        return nil
+    }
+
+    /// Pin the collapsed display to one session (health-dot tap). Holds until
+    /// the session goes idle, or another pin replaces it.
+    func focusSession(_ sessionId: String) {
+        guard sessions[sessionId] != nil else { return }
+        manualFocusId = sessionId
+        if rotatingSessionId != sessionId {
+            rotatingSessionId = sessionId
+            ESP32StatePublisher.shared.notifyDirty()
+            AppleCompanionPublisher.shared.notifyDirty()
+        }
+    }
+
+    /// Set (or clear) the user alias for a session: durable store + reactive
+    /// mirror on the snapshot.
+    func setAlias(_ alias: String?, for sessionId: String) {
+        SessionAliasStore.setAlias(alias, for: sessionId)
+        sessions[sessionId]?.userAlias = SessionAliasStore.alias(for: sessionId)
     }
 
     /// Start monitoring the CLI process for a session.
@@ -2825,6 +2909,7 @@ final class AppState {
             var snapshot = SessionSnapshot(startTime: p.startTime)
             snapshot.cwd = p.cwd
             snapshot.source = source
+            snapshot.userAlias = SessionAliasStore.alias(for: restoredSessionId)
             snapshot.model = p.model
             snapshot.sessionTitle = p.sessionTitle
             snapshot.sessionTitleSource = p.sessionTitleSource

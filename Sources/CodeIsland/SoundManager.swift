@@ -15,6 +15,7 @@ class SoundManager {
         ("PostToolUseFailure","8bit_error",     SettingsKey.soundTaskError,      "任务错误"),
         ("PermissionRequest", "8bit_approval",  SettingsKey.soundApprovalNeeded, "需要审批"),
         ("UserPromptSubmit",  "8bit_submit",    SettingsKey.soundPromptSubmit,   "任务确认"),
+        ("Stalled",           "8bit_stalled",   SettingsKey.soundStalled,        "输出停滞"),
     ]
 
     private var soundCache: [String: NSSound] = [:]

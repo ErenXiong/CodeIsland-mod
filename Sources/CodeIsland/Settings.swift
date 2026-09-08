@@ -58,6 +58,7 @@ enum SettingsKey {
     static let soundTaskError = "soundTaskError"
     static let soundApprovalNeeded = "soundApprovalNeeded"
     static let soundPromptSubmit = "soundPromptSubmit"
+    static let soundStalled = "soundStalled"
     static let soundBoot = "soundBoot"
     // Quiet hours — minutes since midnight; start > end spans midnight
     static let quietHoursEnabled = "quietHoursEnabled"
@@ -168,6 +169,7 @@ struct SettingsDefaults {
     static let soundTaskError = true
     static let soundApprovalNeeded = true
     static let soundPromptSubmit = false
+    static let soundStalled = true
     static let soundBoot = true
     static let quietHoursEnabled = false
     static let quietHoursStart = 22 * 60
@@ -253,6 +255,7 @@ class SettingsManager {
             SettingsKey.soundTaskError: SettingsDefaults.soundTaskError,
             SettingsKey.soundApprovalNeeded: SettingsDefaults.soundApprovalNeeded,
             SettingsKey.soundPromptSubmit: SettingsDefaults.soundPromptSubmit,
+            SettingsKey.soundStalled: SettingsDefaults.soundStalled,
             SettingsKey.soundBoot: SettingsDefaults.soundBoot,
             SettingsKey.quietHoursEnabled: SettingsDefaults.quietHoursEnabled,
             SettingsKey.quietHoursStart: SettingsDefaults.quietHoursStart,
